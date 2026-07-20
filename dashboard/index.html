@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Decision Intelligence Platform</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --mut:#666; --line:#e2e2e2;
+          --ok:#1a7f37; --warn:#b45309; --bad:#b91c1c; --card:#fafafa; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111; --fg:#eee; --mut:#999; --line:#333; --card:#1a1a1a; }
+  }
+  * { box-sizing:border-box }
+  body { margin:0; font:14px/1.5 system-ui,sans-serif; background:var(--bg);
+         color:var(--fg); }
+  main { max-width:1100px; margin:0 auto; padding:1.5rem; }
+  h1 { font-size:1.3rem } h2 { font-size:1rem; margin:1.6rem 0 .5rem }
+  .principle { color:var(--mut); font-style:italic }
+  .card { background:var(--card); border:1px solid var(--line);
+          border-radius:8px; padding:1rem; margin:.8rem 0 }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums }
+  th,td { text-align:left; padding:.3rem .6rem; border-bottom:1px solid var(--line) }
+  th { color:var(--mut); font-weight:600; font-size:.8rem;
+       text-transform:uppercase }
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  .mut{color:var(--mut)}
+  .headline { font-size:1.05rem; font-weight:600 }
+  .overflow { overflow-x:auto }
+  #err { color:var(--bad) }
+</style>
+</head>
+<body>
+<main>
+  <h1>Decision Intelligence Platform</h1>
+  <p class="principle">Never makes predictions. Only consumes them.</p>
+  <p id="err"></p>
+
+  <div class="card"><div class="headline" id="assessment">loading…</div></div>
+
+  <h2>Quality (Module 2) + Recommendations (Module 9)</h2>
+  <div class="card overflow"><table id="quality">
+    <thead><tr><th>rec</th><th>score</th><th>coverage</th><th>subject</th>
+               <th>market</th><th>line</th><th>why</th></tr></thead>
+    <tbody></tbody></table></div>
+
+  <h2>Portfolio (Module 3) — under correlation discount (Module 4)</h2>
+  <div class="card overflow"><table id="portfolio">
+    <thead><tr><th>subject</th><th>quality</th><th>confidence</th>
+               <th>marginal</th><th>max &rho;</th></tr></thead>
+    <tbody></tbody></table>
+    <p class="mut" id="concentration"></p></div>
+
+  <h2>Simulation (Module 5)</h2>
+  <div class="card" id="simulation">–</div>
+
+  <h2>Alerts (Module 10)</h2>
+  <div class="card overflow"><table id="alerts">
+    <thead><tr><th>when</th><th>severity</th><th>subject</th></tr></thead>
+    <tbody></tbody></table></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (x) => String(x ?? "–").replace(/[&<>]/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const sevCls = {info:"ok", warning:"warn", critical:"bad"};
+const recCls = {High:"ok", Medium:"warn", Low:"mut", None:"mut", null:"bad"};
+
+async function j(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(`${path}: ${r.status}`);
+  return r.json();
+}
+
+async function load() {
+  try {
+    const q = await j("/quality");
+    $("#assessment").textContent = q.assessment;
+    $("#quality tbody").innerHTML = q.predictions.map(p => {
+      const r = p.recommendation ?? {};
+      return `<tr><td class="${recCls[r.recommendation] ?? "mut"}">${esc(r.recommendation)}</td>
+        <td>${esc(p.quality.score)}</td>
+        <td>${Math.round((p.quality.coverage ?? 0) * 100)}%</td>
+        <td>${esc(p.entity)}</td><td>${esc(p.market)}</td>
+        <td>${esc(p.line)}</td><td class="mut">${esc(r.why)}</td></tr>`;
+    }).join("");
+
+    const f = await j("/portfolio");
+    $("#portfolio tbody").innerHTML = f.portfolio.length
+      ? f.portfolio.map(h => `<tr><td>${esc(h.entity)}</td>
+          <td>${esc(h.quality)}</td><td>${esc(h.confidence)}</td>
+          <td>${esc(h.marginal_value)}</td>
+          <td>${esc(h.max_rho_at_selection)}</td></tr>`).join("")
+      : `<tr><td colspan="5" class="mut">empty — nothing selected</td></tr>`;
+    const c = f.concentration ?? {};
+    $("#concentration").textContent = c.n
+      ? `${c.n} picks across ${c.unique_events} events — ` +
+        `${c.effective_independent_bets} effective independent positions`
+      : "";
+
+    const s = await j("/simulation");
+    $("#simulation").innerHTML = s.num_sims
+      ? `expected <b>${s.expected}</b> of ${s.n_predictions} hit over ` +
+        `${s.num_sims.toLocaleString()} runs · best ${s.best_case} · ` +
+        `worst ${s.worst_case} · P(all) ${(s.p_all_hit*100).toFixed(1)}% · ` +
+        `P(none) ${(s.p_none_hit*100).toFixed(1)}%`
+      : "no simulation yet";
+
+    const al = await j("/alerts");
+    $("#alerts tbody").innerHTML = al.alerts.length
+      ? al.alerts.map(a => `<tr><td class="mut">${esc(a.created_at)}</td>
+          <td class="${sevCls[a.severity] ?? ""}">${esc(a.severity)}</td>
+          <td>${esc(a.subject)}</td></tr>`).join("")
+      : `<tr><td colspan="3" class="mut">none</td></tr>`;
+  } catch (e) {
+    $("#err").textContent =
+      `${e.message} — POST /predictions first, then reload.`;
+  }
+}
+load();
+</script>
+</main>
+</body>
+</html>
