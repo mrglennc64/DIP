@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import traceback
+import urllib.parse
 
 from . import resolve, store
 from .adapters import fantasy, mlbedge, polymarket
@@ -92,6 +93,74 @@ def ingest(con, date: str) -> dict:
         out[fantasy.SOURCE]["results_applied"] = res["applied"]
 
     return out
+
+
+def grade_pushed(con, limit: int = 300) -> dict:
+    """Grade rows that arrived via POST /predictions whose event_key is a
+    Polymarket slug — the tennis/WNBA/weather boards a producer pushes.
+
+    Outcome truth still arrives WITH the venue (Polymarket's own settlement,
+    fetched state-agnostically by slug); DIP never re-derives results from a
+    second oracle. Two settled shapes are recognized inside the slug's event:
+      - player/team-named two-outcome markets: the winner is the settled
+        outcome name, matched against the prediction's entity
+      - Yes/No bucket markets: the market whose label contains the entity,
+        result = settled YES
+    Anything not yet closed stays pending for the next run.
+    """
+    from .contract import norm_entity
+    pending = applied = still_open = 0
+    for src in ("contest-edge", "polymarket"):
+        for row in store.unresolved_by_source(con, src, limit=limit):
+            raw = json.loads(row["raw"] or "{}")
+            slug = str(raw.get("event_key") or "")
+            if not slug or " " in slug or polymarket._SLUG.match(slug):
+                continue        # titles aren't slugs; crypto has its own path
+            pending += 1
+            try:
+                evs = polymarket._get(
+                    f"{polymarket.GAMMA}/events?slug="
+                    f"{urllib.parse.quote(slug)}")
+            except Exception:
+                continue
+            ev = evs[0] if isinstance(evs, list) and evs else None
+            if not ev:
+                continue
+            result = _pushed_result(ev, row["entity"])
+            if result is None:
+                still_open += 1
+                continue
+            if store.record_result(con, row["id"], None, result,
+                                   graded_by="polymarket_resolution"):
+                applied += 1
+    return {"applied": applied, "pending": pending, "still_open": still_open}
+
+
+def _pushed_result(ev: dict, entity: str) -> str | None:
+    from .contract import norm_entity
+    want = norm_entity(entity)
+    for mk in ev.get("markets", []):
+        settled = bool(mk.get("closed")) or \
+            str(mk.get("umaResolutionStatus", "")).lower() == "resolved"
+        if not settled:
+            continue
+        try:
+            outcomes = json.loads(mk.get("outcomes") or "[]")
+            prices = [float(x) for x in json.loads(mk.get("outcomePrices") or "[]")]
+        except (ValueError, TypeError):
+            continue
+        if len(outcomes) != 2 or len(prices) != 2 or max(prices) < 0.99:
+            continue
+        if outcomes[0] == "Yes":
+            label = norm_entity(str(mk.get("groupItemTitle")
+                                    or mk.get("question") or ""))
+            if want and want in label:
+                return "1" if prices[0] >= 0.99 else "0"
+        else:
+            for o, p in zip(outcomes, prices):
+                if norm_entity(str(o)) == want:
+                    return "1" if p >= 0.99 else "0"
+    return None
 
 
 def grade_polymarket(con, limit: int = 200) -> dict:
@@ -170,6 +239,9 @@ def main(argv=None) -> int:
         pm = grade_polymarket(con)
         print(f"polymarket applied={pm['applied']} of {pm['pending']} pending "
               f"({pm['still_open']} still open)")
+        gp = grade_pushed(con)
+        print(f"pushed applied={gp['applied']} of {gp['pending']} pending "
+              f"({gp['still_open']} still open)")
 
         if not a.date:
             return 0
