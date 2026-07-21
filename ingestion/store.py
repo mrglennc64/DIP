@@ -183,6 +183,26 @@ def unresolved(con: sqlite3.Connection, event_date: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def unresolved_by_source(con: sqlite3.Connection, source: str,
+                         limit: int = 500) -> list[dict]:
+    """Ungraded predictions for one source, oldest first, regardless of date.
+
+    Separate from unresolved() because that filters on an exact event_date, and
+    a source whose event_date is a WINDOW TIMESTAMP rather than a calendar day
+    (Polymarket's 5-minute markets) has no single date to ask for. Oldest first
+    because those are the ones whose outcome exists by now; newest first would
+    spend the whole budget re-asking about windows still in flight.
+    """
+    rows = con.execute("""
+        SELECT p.* FROM predictions p
+        LEFT JOIN results r ON r.prediction_id = p.id
+        WHERE p.source = ? AND r.prediction_id IS NULL
+        ORDER BY p.event_date ASC
+        LIMIT ?
+    """, (source, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def stats(con: sqlite3.Connection, event_date: str | None = None) -> dict:
     where, args = ("WHERE event_date = ?", (event_date,)) if event_date else ("", ())
     preds = con.execute(f"SELECT COUNT(*) c FROM predictions {where}", args).fetchone()["c"]

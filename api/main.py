@@ -33,6 +33,7 @@ from ingestion import store                                # noqa: E402
 from ingestion.contract import (CONF_PROBABILITY, Prediction,  # noqa: E402
                                 norm_entity)
 from explainability import attribution                     # noqa: E402
+from scoring import gate, quality as qmod                  # noqa: E402
 
 DB = os.environ.get("DIP_DB", os.path.join(os.path.dirname(__file__),
                                            "..", "data", "dip.sqlite3"))
@@ -200,6 +201,105 @@ def get_alerts(limit: int = Query(50, le=500)):
         "SELECT * FROM alerts ORDER BY created_at DESC LIMIT ?", (limit,))]
     con.close()
     return {"alerts": rows}
+
+
+@app.get("/decision")
+def get_decision():
+    """The three questions, answered off the LEDGER rather than a posted file.
+
+    1. Is the system trusted?   -> a light per market, rolled up
+    2. Is anything green today? -> a count, usually 0
+    3. For each green: what, where, how much?
+
+    Reads the ledger directly because the answer to "can I trust this" is a
+    property of accumulated graded history, not of whatever batch was last
+    POSTed. A page that answered it from the current batch would go green the
+    moment someone uploaded a good day.
+    """
+    con = _con()
+
+    # ---- graded history, grouped per market. Never pooled: one market's
+    # evidence must not unlock another's recommendations.
+    hist: dict[tuple, list] = {}
+    for r in con.execute(
+            "SELECT p.source, p.market, p.side, p.prob_over, res.result "
+            "FROM results res JOIN predictions p ON p.id = res.prediction_id "
+            "WHERE res.result IN ('1','0')"):
+        up = r["result"] == "1"
+        over = r["side"] == "over"
+        hist.setdefault((r["source"], r["market"]), []).append({
+            "market": r["market"],
+            "p": r["prob_over"] if over else 1.0 - r["prob_over"],
+            "hit": int(up if over else not up)})
+
+    lights, sidelined = {}, []
+    for (src, mkt), rows in sorted(hist.items()):
+        L = gate.market_light(rows, venue=src)
+        key = f"{src}/{mkt}"
+        # A market that has not cleared its own cost of trading is set aside
+        # rather than mixed in. Stated as the arithmetic, not as a hunch, and
+        # self-updating: if it ever clears, it comes back on its own.
+        if L["realized"] is not None and L["realized"] < L["breakeven"]:
+            sidelined.append({
+                "market": key, "n": L["n"],
+                "why": (f"realized {L['realized']:.1%} vs {L['breakeven']:.1%} "
+                        f"breakeven at {L['fee']:.0%} fee — "
+                        f"{(L['breakeven']-L['realized'])*100:.1f} pts short of "
+                        f"covering its own cost")})
+        else:
+            lights[key] = L
+
+    if lights:
+        roll = gate.rollup(lights)
+    elif sidelined:
+        # Every market set aside is its own answer, and a distinct one from
+        # "still gathering": these markets are not unproven, they are priced
+        # such that clearing their own cost is the problem.
+        roll = {"light": gate.RED, "trusted": 0, "total": 0,
+                "headline": (f"All {len(sidelined)} markets set aside — none "
+                             f"covers its own cost of trading. Nothing to "
+                             f"trust yet, and nothing worth proving here.")}
+    else:
+        roll = gate.rollup({})
+
+    # ---- Layer 2: opportunities need a fair value AND a venue price for the
+    # SAME question. That is the cross-source join.
+    rows = con.execute(
+        "SELECT domain, market, entity, event_date, COUNT(DISTINCT source) ns "
+        "FROM predictions GROUP BY domain, market, entity, event_date "
+        "HAVING ns > 1").fetchall()
+
+    green, amber, blocked = [], [], []
+    if not rows:
+        n_pred = con.execute("SELECT COUNT(*) c FROM predictions").fetchone()["c"]
+        srcs = [r["source"] for r in con.execute(
+            "SELECT DISTINCT source FROM predictions")]
+        # The honest empty state. "No opportunities" and "no opportunity is
+        # EXPRESSIBLE" are different failures and must not print the same
+        # sentence — the second one is a data-contract bug upstream, and
+        # rendering it as a quiet market would hide it indefinitely.
+        blocked.append(
+            f"No model/venue pair is comparable. {n_pred} predictions from "
+            f"{len(srcs)} sources ({', '.join(srcs)}), but no two share "
+            f"(entity, market, event_date) — so no fair value can be priced "
+            f"against a venue. Producer-side fix: the model's rows need the "
+            f"same event identifier the venue uses.")
+
+    n_open = con.execute("SELECT COUNT(*) c FROM predictions p LEFT JOIN results r "
+                         "ON r.prediction_id = p.id WHERE r.prediction_id IS NULL"
+                         ).fetchone()["c"]
+    con.close()
+
+    return {
+        "layer1": {**roll, "markets": lights, "sidelined": sidelined},
+        "layer2": {"green": green, "amber": amber, "blocked": blocked,
+                   "checked": n_open, "n_markets": len(lights) + len(sidelined),
+                   "message": (gate.nothing_today(n_open, len(hist))
+                               if not green and not blocked else None)},
+        "thresholds": {"min_graded": gate.MIN_GRADED, "min_edge": gate.MIN_EDGE,
+                       "min_quality": gate.MIN_QUALITY,
+                       "min_coverage": gate.MIN_COVERAGE},
+    }
 
 
 @app.get("/health")
