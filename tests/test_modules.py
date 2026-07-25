@@ -297,5 +297,15 @@ check("positive EV with real fill + lag reads green",
 check("no supplied attrs -> not tradeable (honest), not a crash",
       gate.tradeable_light([{"hit": 1, "p": 0.6}])["light"] == gate.RED)
 
+# Identity: two cities, same bucket label, same day must NOT collide for an
+# event-keyed market — but must still ignore event_key for ordinary markets.
+from ingestion.contract import prediction_id as _pid                # noqa: E402
+check("event-keyed market: different event_key -> different id",
+      _pid("ce", "w", "92 93f", "temp_lock", 0.5, "2026-07-25", "dallas-evt")
+      != _pid("ce", "w", "92 93f", "temp_lock", 0.5, "2026-07-25", "houston-evt"))
+check("ordinary market: event_key ignored in identity",
+      _pid("ce", "mlb", "deGrom", "strikeouts", 5.5, "2026-07-25", "g1")
+      == _pid("ce", "mlb", "deGrom", "strikeouts", 5.5, "2026-07-25", "g2"))
+
 print("\n" + (f"{len(FAILS)} FAILURES: " + ", ".join(FAILS) if FAILS else "ALL PASS"))
 sys.exit(1 if FAILS else 0)

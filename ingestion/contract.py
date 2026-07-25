@@ -53,8 +53,17 @@ def norm_entity(name: str) -> str:
                    if c.isalpha() or c.isdigit() or c == " ").strip()
 
 
+# Markets whose identity MUST also include event_key. For player-prop markets
+# one entity plays one event per day, so (entity, market, line, date) is unique
+# and event_key stays out (see below). But bucket markets reuse the SAME label
+# across events — two cities can both have a "92-93°F" bucket the same day — so
+# without event_key their locks collide to one id and INSERT OR IGNORE silently
+# drops the second. These markets fold the event key in to stay distinct.
+EVENT_KEYED_MARKETS = {"temp_lock"}
+
+
 def prediction_id(source: str, domain: str, entity: str, market: str,
-                  line: float, event_date: str) -> str:
+                  line: float, event_date: str, event_key: str = "") -> str:
     """Stable identity for a prediction.
 
     `line` is part of the identity deliberately. When a book moves 5.5 -> 6.5,
@@ -63,8 +72,16 @@ def prediction_id(source: str, domain: str, entity: str, market: str,
     was made against. Including line keeps both on the record; excluding it
     would let the later one overwrite the earlier and make the ledger flatter
     for exactly the days when line movement mattered most.
+
+    `event_key` is folded in ONLY for EVENT_KEYED_MARKETS. Elsewhere it is
+    excluded on purpose: player-prop identity is (entity, market, line, date),
+    and mixing the venue's event id in would fragment a player's day across
+    however many books quote it. Grading is unaffected either way — it resolves
+    by the stored id, not by re-deriving this hash.
     """
     key = f"{source}|{domain}|{entity}|{market}|{line:g}|{event_date}"
+    if market in EVENT_KEYED_MARKETS and event_key:
+        key += f"|{event_key}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
@@ -99,7 +116,8 @@ class Prediction:
     @property
     def id(self) -> str:
         return prediction_id(self.source, self.domain, self.entity,
-                             self.market, self.line, self.event_date)
+                             self.market, self.line, self.event_date,
+                             self.event_key)
 
     def validate(self) -> list[str]:
         """Return a list of problems; empty means the row is ingestible.
