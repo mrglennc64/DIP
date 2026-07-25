@@ -58,14 +58,34 @@ def breakeven_rate(price: float, fee: float = DEFAULT_FEE) -> float:
     return price / (price + (1.0 - price) * (1.0 - fee))
 
 
-def market_light(rows: list[dict], venue: str = "", min_graded: int = MIN_GRADED
-                 ) -> dict:
+# Correlated same-(city, day) locks are one weather event observed through
+# several buckets, not several independent tests — counting them at face value
+# is exactly the "four Dallas locks in an afternoon" trap this gate exists to
+# catch. Within a cluster the first lock counts full; each additional one counts
+# only this fraction. Documented, not hidden, and surfaced on the dashboard.
+CLUSTER_EXTRA = 0.25
+
+
+def effective_independent_n(cluster_sizes) -> float:
+    """De-clustered sample count. `cluster_sizes` is the list of k per
+    correlation group (e.g. per (city, event_date)). Each group yields
+    1 + CLUSTER_EXTRA*(k-1): the first observation full, the rest discounted."""
+    return float(sum(1 + CLUSTER_EXTRA * (k - 1) for k in cluster_sizes if k > 0))
+
+
+def market_light(rows: list[dict], venue: str = "", min_graded: int = MIN_GRADED,
+                 effective_n: float | None = None) -> dict:
     """One market's light, from its own graded history.
 
     `rows` are graded records: {"p": probability of the side taken, "hit": 0|1}.
     The test is deliberately the pessimistic end of the interval — the LOWER
     Wilson bound against breakeven — because the question is not "did we do
     well" but "can we rule out having been lucky".
+
+    `effective_n`, when supplied, is the de-clustered independent count (see
+    effective_independent_n). It gates trust AND widens the interval: correlated
+    bursts must not manufacture a falsely narrow "proven" band. The realized
+    rate stays the raw observed rate; only the EVIDENCE it constitutes shrinks.
     """
     n = len(rows)
     hits = sum(r["hit"] for r in rows)
@@ -73,32 +93,116 @@ def market_light(rows: list[dict], venue: str = "", min_graded: int = MIN_GRADED
     mean_price = (sum(r["p"] for r in rows) / n) if n else 0.5
     be = breakeven_rate(mean_price, fee)
 
-    lo, hi = wilson(hits, n) if n else (0.0, 1.0)
+    eff = float(n) if effective_n is None else min(float(effective_n), float(n))
+    # Scale counts to the effective sample size: same observed rate, wider band.
+    lo, hi = wilson(hits * (eff / n), eff) if n else (0.0, 1.0)
     realized = (hits / n) if n else None
+    declustered = effective_n is not None and eff < n
+    eff_note = f" ({eff:.0f} effective after de-clustering)" if declustered else ""
 
-    if n < min_graded:
+    if eff < min_graded:
         light, headline = RED, (
-            f"{n} graded. Need {min_graded} before this market can be trusted. "
-            f"Paper only.")
+            f"{n} graded{eff_note}. Need {min_graded} before this market can be "
+            f"trusted. Paper only.")
     elif lo <= 0.50:
         light, headline = RED, (
-            f"{n} graded, {realized:.1%} hit rate. Still can't rule out luck "
-            f"(could be as low as {lo:.1%}). No real money — this is the "
-            f"system protecting you, not failing you.")
+            f"{n} graded{eff_note}, {realized:.1%} hit rate. Still can't rule "
+            f"out luck (could be as low as {lo:.1%}). No real money — this is "
+            f"the system protecting you, not failing you.")
     elif lo < be:
         light, headline = AMBER, (
-            f"{n} graded, {realized:.1%} hit rate. Beating a coin flip but not "
-            f"yet the {be:.1%} you need to cover the vig. Edge forming — "
-            f"paper only.")
+            f"{n} graded{eff_note}, {realized:.1%} hit rate. Beating a coin "
+            f"flip but not yet the {be:.1%} you need to cover the vig. Edge "
+            f"forming — paper only.")
     else:
         light, headline = GREEN, (
-            f"{n} graded, {realized:.1%} hit rate. Clears the {be:.1%} "
-            f"breakeven even at the pessimistic end ({lo:.1%}). "
+            f"{n} graded{eff_note}, {realized:.1%} hit rate. Clears the "
+            f"{be:.1%} breakeven even at the pessimistic end ({lo:.1%}). "
             f"Real-money recommendations unlocked.")
 
     return {"light": light, "headline": headline, "n": n, "realized": realized,
-            "ci95": [lo, hi], "breakeven": be, "fee": fee,
-            "fee_assumed": venue not in VENUE_FEE, "mean_price": mean_price}
+            "effective_n": round(eff, 1), "ci95": [lo, hi], "breakeven": be,
+            "fee": fee, "fee_assumed": venue not in VENUE_FEE,
+            "mean_price": mean_price}
+
+
+# ---- Tradeability: a SECOND, independent light -----------------------------
+# "Trustable" (market_light) asks: is the track record real? This asks: is there
+# harvestable, slippage-survivable edge? A market can be one without the other —
+# a calibrated model whose edge evaporates into the spread is trustable but not
+# tradeable; a fat mechanical edge with no graded history is tradeable-looking
+# but not yet trustable. Real money needs BOTH lights green.
+
+MIN_MEDIAN_FILL = 25.0   # $ that a realistic $200 order actually clears at lock
+MIN_MEDIAN_LAG = 300     # seconds of window before the market reprices to match
+MAX_AT_RISK_FRAC = 0.34  # more than a third thin -> a revision could flip them
+
+
+def _median(xs):
+    s = sorted(x for x in xs if x is not None)
+    return s[len(s) // 2] if s else None
+
+
+def tradeable_light(locks: list[dict]) -> dict:
+    """One market's tradeability light from SUPPLIED per-lock attributes.
+
+    Each lock: {"hit":0|1, "p":price_paid, "fill_200":$profit_if_correct,
+    "lag_s":int|None, "at_risk":0|1, "recon_delta_max":float|None}. DIP consumes
+    these; it never recomputes them (it has no METAR feed, no order book).
+
+    EV/downside, not hit-rate (Prompt improvement #5): a wrong lock forfeits the
+    cost paid, which on a binary bought at price p to win 1 is fill*p/(1-p) — far
+    more than the pennies a win earns on an expensive bucket. A high hit rate
+    with negative EV must NOT read green, so the gate is mean P&L, floored by the
+    worst single outcome, not the win count.
+    """
+    usable = [l for l in locks
+              if l.get("fill_200") is not None and l.get("p") not in (None, 0, 1)]
+    n = len(usable)
+    if n == 0:
+        return {"light": RED, "n": 0, "ev": None,
+                "headline": "No tradeability data yet — these locks predate the "
+                            "attribute export (lag/fill/edge). Paper only."}
+
+    pnls = []
+    for l in usable:
+        p = l["p"]
+        upside = l["fill_200"]                 # profit if the lock's side wins
+        downside = upside * p / (1.0 - p)      # cost forfeited if it loses
+        pnls.append(upside if l["hit"] else -downside)
+
+    ev = sum(pnls) / n
+    worst = min(pnls)
+    med_fill = _median([l["fill_200"] for l in usable])
+    med_lag = _median([l.get("lag_s") for l in usable])
+    at_risk_frac = sum(1 for l in usable if l.get("at_risk")) / n
+    max_bias = max((abs(l["recon_delta_max"]) for l in usable
+                    if l.get("recon_delta_max") is not None), default=None)
+
+    if ev <= 0:
+        light, headline = RED, (
+            f"EV ${ev:+.0f}/order after slippage & downside over {n} locks — a "
+            f"wrong lock (worst ${worst:+.0f}) costs more than a right one "
+            f"earns. Hit rate hides this. No real money.")
+    elif (med_fill or 0) < MIN_MEDIAN_FILL or (med_lag or 0) < MIN_MEDIAN_LAG:
+        light, headline = AMBER, (
+            f"EV ${ev:+.0f}/order positive but thin: median ${med_fill or 0:.0f} "
+            f"fillable, median lag {(med_lag or 0)//60:.0f}m. Edge real, depth "
+            f"or window marginal — paper only.")
+    elif at_risk_frac > MAX_AT_RISK_FRAC:
+        light, headline = AMBER, (
+            f"EV ${ev:+.0f}/order positive but {at_risk_frac:.0%} of locks are "
+            f"AT_RISK (thin clearance a revision could flip) — paper only.")
+    else:
+        light, headline = GREEN, (
+            f"EV ${ev:+.0f}/order over {n} locks, median ${med_fill or 0:.0f} "
+            f"fillable with a {(med_lag or 0)//60:.0f}m window. Slippage-"
+            f"survivable edge.")
+
+    return {"light": light, "headline": headline, "n": n, "ev": round(ev, 2),
+            "worst": round(worst, 2), "median_fill": med_fill,
+            "median_lag_s": med_lag, "at_risk_frac": round(at_risk_frac, 3),
+            "max_bias": max_bias}
 
 
 def rollup(lights: dict) -> dict:

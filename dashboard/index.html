@@ -45,6 +45,21 @@
   th,td { text-align:left; padding:.3rem .5rem; border-bottom:1px solid var(--line) }
   th { color:var(--mut); font-weight:600; font-size:.75rem; text-transform:uppercase }
   #err { color:var(--bad) }
+  /* per-market audit cards with distance-to-green bars */
+  .mkt { border:1px solid var(--line); border-radius:8px; padding:.7rem .9rem;
+         margin:.5rem 0; background:var(--card) }
+  .mkt .name { font-weight:600; font-variant-numeric:tabular-nums }
+  .lights { display:flex; gap:1rem; flex-wrap:wrap; margin:.15rem 0 .5rem;
+            font-size:.82rem }
+  .bars { display:grid; grid-template-columns:auto 130px auto; gap:.15rem .6rem;
+          align-items:center; font-size:.8rem; color:var(--mut) }
+  .bar { height:.55rem; border-radius:4px; background:var(--line);
+         overflow:hidden }
+  .bar > i { display:block; height:100%; border-radius:4px; background:var(--mut) }
+  .bar.ok > i { background:var(--ok) }
+  .bar.warn > i { background:var(--warn) }
+  .recon { font-size:.8rem; color:var(--mut); margin-top:.4rem }
+  .tradeline { font-size:.82rem; margin-top:.3rem }
 </style>
 </head>
 <body>
@@ -75,8 +90,7 @@
     <summary>Set aside, and why</summary>
     <table id="sidelined"><thead><tr><th>market</th><th>graded</th>
       <th>why it is not shown</th></tr></thead><tbody></tbody></table>
-    <table id="markets"><thead><tr><th>market</th><th>light</th><th>graded</th>
-      <th>hit rate</th><th>breakeven</th></tr></thead><tbody></tbody></table>
+    <div id="markets"></div>
     <p class="fine" id="thresholds"></p>
   </details>
 
@@ -147,10 +161,44 @@ async function load() {
          <td class="mut">${esc(s.why)}</td></tr>`).join("")
     || `<tr><td colspan="3" class="mut">none</td></tr>`;
 
-  $("#markets tbody").innerHTML = Object.entries(L1.markets ?? {}).map(([k,m]) =>
-    `<tr><td>${esc(k)}</td><td>${DOT[m.light]}</td><td>${esc(m.n)}</td>
-         <td>${pct(m.realized)}</td><td>${pct(m.breakeven)}</td></tr>`).join("")
-    || `<tr><td colspan="5" class="mut">no market has its own light yet</td></tr>`;
+  // A distance-to-green bar: fill = current/threshold, green once it clears.
+  const bar = (cur, thr) => {
+    if (cur == null || thr == null || thr === 0)
+      return `<span class="bar"><i style="width:0"></i></span>`;
+    const f = Math.max(0, Math.min(1, cur / thr));
+    const cls = f >= 1 ? "ok" : f >= 0.66 ? "warn" : "";
+    return `<span class="bar ${cls}"><i style="width:${(f*100).toFixed(0)}%"></i></span>`;
+  };
+  const num = (x, d=0) => x == null ? "—" : Number(x).toFixed(d);
+
+  $("#markets").innerHTML = Object.entries(L1.markets ?? {}).map(([k,m]) => {
+    const dist = m.distance ?? {};
+    const g = dist.graded ?? [m.n, null], rt = dist.rate ?? [m.realized, m.breakeven];
+    const effLabel = (m.effective_n != null && m.effective_n < m.n)
+      ? `${num(m.effective_n,0)} eff / ${g[1]}` : `${num(g[0],0)} / ${g[1]}`;
+    const tr = m.tradeable;
+    const trLight = tr ? `${DOT[tr.light]} tradeable` : "";
+    const recon = m.recon
+      ? `<div class="recon">settlement bias: ${esc(m.recon.city)} `
+        + `${m.recon.delta_max>=0?"+":""}${num(m.recon.delta_max,1)}° max `
+        + `(mean ${m.recon.delta_mean>=0?"+":""}${num(m.recon.delta_mean,1)}°) `
+        + `— reliability of the instrument, not the outcome</div>` : "";
+    const tradeline = tr
+      ? `<div class="tradeline">${DOT[tr.light]} <b>tradeable:</b> ${esc(tr.headline)}</div>`
+      : "";
+    return `<div class="mkt">
+      <div class="name">${esc(k)}</div>
+      <div class="lights">
+        <span>${DOT[m.light]} <b>trustable</b> — track record</span>
+        ${tr ? `<span>${trLight} — harvestable edge</span>` : ""}
+      </div>
+      <div class="bars">
+        <span>graded (de-clustered)</span>${bar(g[0], g[1])}<span>${effLabel}</span>
+        <span>hit rate vs breakeven</span>${bar(rt[0], rt[1])}<span>${pct(rt[0])} / ${pct(rt[1])}</span>
+      </div>
+      ${tradeline}${recon}
+    </div>`;
+  }).join("") || `<div class="mut fine">no market has its own light yet</div>`;
 
   const t = d.thresholds;
   $("#thresholds").textContent =

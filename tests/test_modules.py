@@ -261,5 +261,41 @@ check("simulation ran over the portfolio",
       res["simulation"]["n_predictions"]
       == max(1, len(res["portfolio"]["portfolio"])))
 
+print("\n--- Trigger gate: de-clustering + tradeable light ---")
+from scoring import gate                                    # noqa: E402
+
+check("effective_independent_n discounts a cluster",
+      gate.effective_independent_n([4]) == 1.0 + 0.25 * 3)
+check("effective_independent_n leaves singletons whole",
+      gate.effective_independent_n([1, 1, 1]) == 3.0)
+
+# A correlated burst must NOT unlock trust: 400 rows at 75% clears the raw gate,
+# but 100 effective (de-clustered) keeps it red. This is the whole point.
+burst = ([{"p": 0.5, "hit": 1}] * 300) + ([{"p": 0.5, "hit": 0}] * 100)
+raw_L = gate.market_light(burst)
+eff_L = gate.market_light(burst, effective_n=100.0)
+check("raw count would have gone green", raw_L["light"] == gate.GREEN)
+check("de-clustered count stays red (below min_graded)",
+      eff_L["light"] == gate.RED and eff_L["effective_n"] == 100.0)
+check("de-clustering widens the interval",
+      (eff_L["ci95"][1] - eff_L["ci95"][0]) > (raw_L["ci95"][1] - raw_L["ci95"][0]))
+
+# Tradeable light: EV/downside, not hit rate. A 75%-hit market whose wins earn
+# pennies and losses forfeit the expensive stake must read RED.
+neg = ([{"hit": 1, "p": 0.9, "fill_200": 10.0, "lag_s": 600, "at_risk": 0}] * 3
+       + [{"hit": 0, "p": 0.9, "fill_200": 10.0, "lag_s": 600, "at_risk": 0}])
+negT = gate.tradeable_light(neg)
+check("high hit rate but negative EV reads red",
+      negT["light"] == gate.RED and negT["ev"] < 0)
+
+good = [{"hit": 1, "p": 0.6, "fill_200": 50.0, "lag_s": 1200, "at_risk": 0,
+         "recon_delta_max": 0.5}] * 8
+goodT = gate.tradeable_light(good)
+check("positive EV with real fill + lag reads green",
+      goodT["light"] == gate.GREEN and goodT["ev"] > 0)
+
+check("no supplied attrs -> not tradeable (honest), not a crash",
+      gate.tradeable_light([{"hit": 1, "p": 0.6}])["light"] == gate.RED)
+
 print("\n" + (f"{len(FAILS)} FAILURES: " + ", ".join(FAILS) if FAILS else "ALL PASS"))
 sys.exit(1 if FAILS else 0)

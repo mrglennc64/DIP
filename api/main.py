@@ -18,8 +18,10 @@ Run:  uvicorn api.main:app --port 8100        (from decision-platform/)
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -37,6 +39,11 @@ from scoring import gate, quality as qmod                  # noqa: E402
 
 DB = os.environ.get("DIP_DB", os.path.join(os.path.dirname(__file__),
                                            "..", "data", "dip.sqlite3"))
+
+# Edge-type markets whose edge is mechanical (a lock), not a calibrated forecast:
+# they get de-clustered trust counting AND a separate tradeable light, and carry
+# supplied tradeability attributes DIP scores but never recomputes.
+TRIGGER_MARKETS = {"temp_lock"}
 
 app = FastAPI(title="Decision Intelligence Platform",
               description="Never makes predictions. Only consumes them.")
@@ -70,6 +77,20 @@ class PredictionIn(BaseModel):
     source: str = "api"
     event_key: str = ""
     side: str | None = None
+    # Supplied producer attributes for edge-type-aware markets (e.g. the weather
+    # near-resolution trigger). DIP stores and scores these; it never recomputes
+    # them — it has no METAR feed or order book. They ride into `raw` untouched
+    # and feed the tradeable light + correlated-sample de-clustering, never the
+    # outcome (which stays venue-settled).
+    event_date: str | None = None    # the real event day, for (city, day) clusters
+    city: str | None = None
+    lag_s: float | None = None
+    edge_dollars: float | None = None
+    fill_200: float | None = None
+    at_risk: int | None = None
+    recon_delta_mean: float | None = None
+    recon_delta_max: float | None = None
+    recon_n: int | None = None
 
 
 class PredictionBatch(BaseModel):
@@ -91,7 +112,10 @@ def post_predictions(batch: PredictionBatch):
             domain=r.domain or r.sport or "unspecified",
             entity=norm_entity(display), entity_display=display,
             event_key=r.event_key or f"api:{batch.date}:{i}",
-            market=r.market, event_date=batch.date or r.timestamp[:10],
+            # A supplied event_date (the real event day) wins over the push date,
+            # so a lock keeps ONE identity across re-pushes and (city, day)
+            # clustering is measurable. Falls back to the batch/push date.
+            market=r.market, event_date=r.event_date or batch.date or r.timestamp[:10],
             line=r.line, predicted_value=r.predictedValue,
             prob_over=r.probabilityOver, prob_under=r.probabilityUnder,
             variance=r.variance, side=r.side, confidence=r.confidence,
@@ -219,23 +243,61 @@ def get_decision():
     con = _con()
 
     # ---- graded history, grouped per market. Never pooled: one market's
-    # evidence must not unlock another's recommendations.
+    # evidence must not unlock another's recommendations. For edge-type markets
+    # (the weather trigger) each row also carries the producer's SUPPLIED
+    # tradeability attrs, parsed out of `raw` — DIP scores them, never recomputes.
     hist: dict[tuple, list] = {}
     for r in con.execute(
-            "SELECT p.source, p.market, p.side, p.prob_over, res.result "
+            "SELECT p.source, p.market, p.side, p.prob_over, p.event_date, "
+            "p.raw, res.result "
             "FROM results res JOIN predictions p ON p.id = res.prediction_id "
             "WHERE res.result IN ('1','0')"):
         up = r["result"] == "1"
         over = r["side"] == "over"
-        hist.setdefault((r["source"], r["market"]), []).append({
-            "market": r["market"],
-            "p": r["prob_over"] if over else 1.0 - r["prob_over"],
-            "hit": int(up if over else not up)})
+        rec = {"market": r["market"],
+               "p": r["prob_over"] if over else 1.0 - r["prob_over"],
+               "hit": int(up if over else not up)}
+        if r["market"] in TRIGGER_MARKETS:
+            try:
+                raw = json.loads(r["raw"] or "{}")
+            except (ValueError, TypeError):
+                raw = {}
+            rec.update({
+                "event_date": r["event_date"], "city": raw.get("city"),
+                "fill_200": raw.get("fill_200"), "lag_s": raw.get("lag_s"),
+                "at_risk": raw.get("at_risk"),
+                "recon_delta_mean": raw.get("recon_delta_mean"),
+                "recon_delta_max": raw.get("recon_delta_max")})
+        hist.setdefault((r["source"], r["market"]), []).append(rec)
 
     lights, sidelined = {}, []
     for (src, mkt), rows in sorted(hist.items()):
-        L = gate.market_light(rows, venue=src)
+        if mkt in TRIGGER_MARKETS:
+            # De-cluster same-(city, day) locks: one weather event seen through
+            # several buckets is not several independent proofs.
+            clusters = Counter((row.get("city"), row.get("event_date"))
+                               for row in rows)
+            eff = gate.effective_independent_n(clusters.values())
+            L = gate.market_light(rows, venue=src, effective_n=eff)
+            L["clusters"] = len(clusters)
+            # The SECOND light: is the edge actually harvestable after slippage?
+            L["tradeable"] = gate.tradeable_light(rows)
+            # Reliability annotation: the worst-biased settlement station here.
+            biased = [row for row in rows
+                      if row.get("recon_delta_max") is not None]
+            if biased:
+                w = max(biased, key=lambda x: abs(x["recon_delta_max"]))
+                L["recon"] = {"city": w.get("city"),
+                              "delta_max": w.get("recon_delta_max"),
+                              "delta_mean": w.get("recon_delta_mean")}
+        else:
+            L = gate.market_light(rows, venue=src)
         key = f"{src}/{mkt}"
+        # Distance-to-green data for the dashboard bars: current vs threshold on
+        # each trust dimension. (Layer-2 edge/quality/coverage bars ride on the
+        # opportunity rows, which carry those numbers already.)
+        L["distance"] = {"graded": [L.get("effective_n", L["n"]), gate.MIN_GRADED],
+                         "rate": [L["realized"], L["breakeven"]]}
         # A market that has not cleared its own cost of trading is set aside
         # rather than mixed in. Stated as the arithmetic, not as a hunch, and
         # self-updating: if it ever clears, it comes back on its own.
