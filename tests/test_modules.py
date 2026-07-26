@@ -289,10 +289,16 @@ check("high hit rate but negative EV reads red",
       negT["light"] == gate.RED and negT["ev"] < 0)
 
 good = [{"hit": 1, "p": 0.6, "fill_200": 50.0, "lag_s": 1200, "at_risk": 0,
-         "recon_delta_max": 0.5}] * 8
+         "recon_delta_max": 0.5, "fill_verified": True}] * 8
 goodT = gate.tradeable_light(good)
-check("positive EV with real fill + lag reads green",
+check("positive EV with a VERIFIED real fill reads green",
       goodT["light"] == gate.GREEN and goodT["ev"] > 0)
+# Same locks but fill unverified (displayed depth only) must NOT green — the
+# phantom-liquidity guard: displayed depth can be spoofed, so it caps at amber.
+unver = [{**l, "fill_verified": False} for l in good]
+unverT = gate.tradeable_light(unver)
+check("positive EV but UNVERIFIED (displayed depth) caps at amber",
+      unverT["light"] == gate.AMBER and unverT["fill_basis"] == "displayed")
 
 check("no supplied attrs -> not tradeable (honest), not a crash",
       gate.tradeable_light([{"hit": 1, "p": 0.6}])["light"] == gate.RED)

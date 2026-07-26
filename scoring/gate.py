@@ -164,6 +164,15 @@ def tradeable_light(locks: list[dict]) -> dict:
                 "headline": "No tradeability data yet — these locks predate the "
                             "attribute export (lag/fill/edge). Paper only."}
 
+    # fill_200 is derived from DISPLAYED order-book depth, which can be spoofed
+    # (posted, then cancelled the instant an order would take it) — and at a
+    # 5-10 min poll cadence we cannot observe those sub-second cancels. So a
+    # tradeable light computed off displayed depth is an UPPER BOUND, never a go
+    # signal. Green requires a fill CONFIRMED by a real trade; until then the
+    # best this light may show is amber. `fill_verified` flips only when a
+    # producer-supplied real-fill exists for the market.
+    verified = any(l.get("fill_verified") for l in usable)
+
     pnls = []
     for l in usable:
         p = l["p"]
@@ -193,16 +202,23 @@ def tradeable_light(locks: list[dict]) -> dict:
         light, headline = AMBER, (
             f"EV ${ev:+.0f}/order positive but {at_risk_frac:.0%} of locks are "
             f"AT_RISK (thin clearance a revision could flip) — paper only.")
+    elif not verified:
+        light, headline = AMBER, (
+            f"EV ${ev:+.0f}/order over {n} locks looks survivable, but it's off "
+            f"DISPLAYED depth — unverified against a real fill (depth can be "
+            f"spoofed and our poll can't see sub-second cancels). Paper until a "
+            f"real trade confirms the fill.")
     else:
         light, headline = GREEN, (
             f"EV ${ev:+.0f}/order over {n} locks, median ${med_fill or 0:.0f} "
-            f"fillable with a {(med_lag or 0)//60:.0f}m window. Slippage-"
-            f"survivable edge.")
+            f"fillable with a {(med_lag or 0)//60:.0f}m window, confirmed against "
+            f"real fills. Slippage-survivable edge.")
 
     return {"light": light, "headline": headline, "n": n, "ev": round(ev, 2),
             "worst": round(worst, 2), "median_fill": med_fill,
             "median_lag_s": med_lag, "at_risk_frac": round(at_risk_frac, 3),
-            "max_bias": max_bias}
+            "max_bias": max_bias, "fill_verified": verified,
+            "fill_basis": "real" if verified else "displayed"}
 
 
 def rollup(lights: dict) -> dict:
