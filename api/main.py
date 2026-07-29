@@ -25,7 +25,8 @@ from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from fastapi import FastAPI, HTTPException, Query          # noqa: E402
+from fastapi import FastAPI, HTTPException, Query, Request  # noqa: E402
+from fastapi.responses import RedirectResponse             # noqa: E402
 from pydantic import BaseModel, Field                      # noqa: E402
 
 from api import pipeline                                   # noqa: E402
@@ -228,7 +229,7 @@ def get_alerts(limit: int = Query(50, le=500)):
 
 
 @app.get("/decision")
-def get_decision():
+def get_decision(request: Request):
     """The three questions, answered off the LEDGER rather than a posted file.
 
     1. Is the system trusted?   -> a light per market, rolled up
@@ -240,6 +241,13 @@ def get_decision():
     POSTed. A page that answered it from the current batch would go green the
     moment someone uploaded a good day.
     """
+    # A human typing /decision into the address bar wants the dashboard, not raw
+    # JSON — browsers announce that with `Accept: text/html`, while the page's own
+    # fetch() sends */*. Bounce the browser to the rendered page; keep the JSON
+    # for the API (curl, the dashboard's fetch, any programmatic client).
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse("/")
+
     con = _con()
 
     # ---- graded history, grouped per market. Never pooled: one market's
