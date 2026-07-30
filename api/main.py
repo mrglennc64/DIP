@@ -46,6 +46,21 @@ DB = os.environ.get("DIP_DB", os.path.join(os.path.dirname(__file__),
 # supplied tradeability attributes DIP scores but never recomputes.
 TRIGGER_MARKETS = {"temp_lock"}
 
+# Markets that TRADE on Polymarket, whichever source predicted them. The trading
+# fee is a property of the venue, not the predictor: a contest-edge tennis call is
+# still filled on Polymarket and still pays its 7% taker fee. Pricing these
+# fee-free let a favourite-backing market flash GREEN on an edge the fee erases —
+# so their breakeven is computed at the Polymarket fee, not zero.
+POLYMARKET_TRADED = {"match_moneyline", "match_moneyline_edge", "team_moneyline",
+                     "temp_bucket", "temp_lock", "updown_5m", "updown_15m",
+                     "updown_4h"}
+
+
+def _fee_venue(src, mkt):
+    """Venue used for the FEE only (breakeven), not for grouping/labelling."""
+    return "polymarket" if mkt in POLYMARKET_TRADED else src
+
+
 app = FastAPI(title="Decision Intelligence Platform",
               description="Never makes predictions. Only consumes them.")
 
@@ -280,13 +295,14 @@ def get_decision(request: Request):
 
     lights, sidelined = {}, []
     for (src, mkt), rows in sorted(hist.items()):
+        fee_venue = _fee_venue(src, mkt)
         if mkt in TRIGGER_MARKETS:
             # De-cluster same-(city, day) locks: one weather event seen through
             # several buckets is not several independent proofs.
             clusters = Counter((row.get("city"), row.get("event_date"))
                                for row in rows)
             eff = gate.effective_independent_n(clusters.values())
-            L = gate.market_light(rows, venue=src, effective_n=eff)
+            L = gate.market_light(rows, venue=fee_venue, effective_n=eff)
             L["clusters"] = len(clusters)
             # The SECOND light: is the edge actually harvestable after slippage?
             L["tradeable"] = gate.tradeable_light(rows)
@@ -299,7 +315,7 @@ def get_decision(request: Request):
                               "delta_max": w.get("recon_delta_max"),
                               "delta_mean": w.get("recon_delta_mean")}
         else:
-            L = gate.market_light(rows, venue=src)
+            L = gate.market_light(rows, venue=fee_venue)
         key = f"{src}/{mkt}"
         # Distance-to-green data for the dashboard bars: current vs threshold on
         # each trust dimension. (Layer-2 edge/quality/coverage bars ride on the
