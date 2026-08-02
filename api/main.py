@@ -388,6 +388,31 @@ def get_decision(request: Request):
     }
 
 
+@app.get("/funding")
+def get_funding():
+    """Standalone funding-carry monitor — SEPARATE from prediction scoring. Is the
+    delta-neutral BTC/ETH carry regime paying enough to beat cash after risk?
+    Live 30d average funding from Binance USD-M. Surfaced here as a decision gauge;
+    it is not a prediction and does not touch the ledger."""
+    import statistics
+    import requests
+    yr, thresh, out = 3 * 365, 0.15, {}
+    for a in ("BTC", "ETH"):
+        try:
+            r = requests.get("https://fapi.binance.com/fapi/v1/fundingRate",
+                             params={"symbol": f"{a}USDT", "limit": 90}, timeout=15,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            out[a] = round(statistics.mean(
+                float(x["fundingRate"]) for x in r.json()) * yr, 4)
+        except Exception:
+            out[a] = None
+    vals = [v for v in out.values() if v is not None]
+    verdict = ("no data" if not vals else
+               "PAYING" if any(v >= thresh for v in vals) else
+               "thin" if max(vals) > 0 else "negative")
+    return {"assets": out, "threshold": thresh, "verdict": verdict}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "principle":

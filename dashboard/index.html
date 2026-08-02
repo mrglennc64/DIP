@@ -86,6 +86,10 @@
   <h2>3 &middot; What, where, how much?</h2>
   <div id="slips"><div class="card mut" id="noslips">&mdash;</div></div>
 
+  <!-- Funding-carry monitor: a standalone crypto decision gauge, NOT prediction scoring -->
+  <h2>4 &middot; Funding-carry regime <span class="fine">(standalone crypto monitor)</span></h2>
+  <div class="card" id="funding"><div class="fine">loading&hellip;</div></div>
+
   <details>
     <summary>Set aside, and why</summary>
     <table id="sidelined"><thead><tr><th>market</th><th>graded</th>
@@ -206,7 +210,24 @@ async function load() {
     `quality ≥ ${t.min_quality}, coverage ≥ ${(t.min_coverage*100).toFixed(0)}%, ` +
     `and only from a market with ≥ ${t.min_graded} graded outcomes clearing its breakeven.`;
 }
+async function loadFunding() {
+  try {
+    const r = await fetch("/funding"); if (!r.ok) return;
+    const f = await r.json(), a = f.assets || {};
+    const icon = {PAYING:"🟢", thin:"🟡", negative:"🔴"}[f.verdict] ?? "⚪";
+    const say = f.verdict === "PAYING" ? "DEPLOY window — carry pays a real premium"
+              : f.verdict === "thin" ? "Stand down — thin vs cash, don't deploy"
+              : f.verdict === "negative" ? "Stand down — funding negative"
+              : "no data";
+    $("#funding").innerHTML =
+      `<div class="say">${icon} ${esc(say)}</div>` +
+      `<div class="fine">BTC ${pct(a.BTC)} &middot; ETH ${pct(a.ETH)} annualized ` +
+      `(30d avg) &middot; deploy above ${pct(f.threshold)}. Delta-neutral carry only ` +
+      `&mdash; not a prediction. Phone alerts fire via ntfy when it flips.</div>`;
+  } catch (e) {}
+}
 load();
+loadFunding();
 </script>
 </main>
 </body>
