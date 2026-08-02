@@ -394,16 +394,19 @@ def get_funding():
     delta-neutral BTC/ETH carry regime paying enough to beat cash after risk?
     Live 30d average funding from Binance USD-M. Surfaced here as a decision gauge;
     it is not a prediction and does not touch the ledger."""
+    import json as _json
     import statistics
-    import requests
+    import urllib.request
     yr, thresh, out = 3 * 365, 0.15, {}
     for a in ("BTC", "ETH"):
         try:
-            r = requests.get("https://fapi.binance.com/fapi/v1/fundingRate",
-                             params={"symbol": f"{a}USDT", "limit": 90}, timeout=15,
-                             headers={"User-Agent": "Mozilla/5.0"})
+            url = ("https://fapi.binance.com/fapi/v1/fundingRate"
+                   f"?symbol={a}USDT&limit=90")
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read())
             out[a] = round(statistics.mean(
-                float(x["fundingRate"]) for x in r.json()) * yr, 4)
+                float(x["fundingRate"]) for x in data) * yr, 4)
         except Exception:
             out[a] = None
     vals = [v for v in out.values() if v is not None]
