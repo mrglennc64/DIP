@@ -394,26 +394,25 @@ def get_funding():
     delta-neutral BTC/ETH carry regime paying enough to beat cash after risk?
     Live 30d average funding from Binance USD-M. Surfaced here as a decision gauge;
     it is not a prediction and does not touch the ledger."""
-    import json as _json
-    import statistics
-    import urllib.request
-    yr, thresh, out = 3 * 365, 0.15, {}
-    for a in ("BTC", "ETH"):
-        try:
-            url = ("https://fapi.binance.com/fapi/v1/fundingRate"
-                   f"?symbol={a}USDT&limit=90")
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = _json.loads(resp.read())
-            out[a] = round(statistics.mean(
-                float(x["fundingRate"]) for x in data) * yr, 4)
-        except Exception:
-            out[a] = None
-    vals = [v for v in out.values() if v is not None]
-    verdict = ("no data" if not vals else
-               "PAYING" if any(v >= thresh for v in vals) else
-               "thin" if max(vals) > 0 else "negative")
-    return {"assets": out, "threshold": thresh, "verdict": verdict}
+    import sqlite3
+    thresh, rows, scan = 0.15, [], None
+    try:
+        con = sqlite3.connect("/root/carry_radar.sqlite")
+        scan = con.execute("SELECT max(ts) FROM ticks").fetchone()[0]
+        rows = con.execute(
+            "SELECT venue, asset, fund_now, fund_30d, basis_bps, depth_usd "
+            "FROM ticks WHERE ts=? ORDER BY fund_30d DESC", (scan,)).fetchall()
+        con.close()
+    except Exception:
+        rows = []
+    data = [{"venue": v, "asset": a, "fund_now": round(fn, 4),
+             "fund_30d": round(f30, 4), "basis_bps": round(b, 1),
+             "depth_usd": round(d)} for v, a, fn, f30, b, d in rows]
+    best = data[0]["fund_30d"] if data else None
+    verdict = ("no data" if best is None else "PAYING" if best >= thresh
+               else "thin" if best > 0 else "negative")
+    return {"scan": scan, "threshold": thresh, "best_30d": best,
+            "verdict": verdict, "rows": data}
 
 
 @app.get("/health")

@@ -213,17 +213,26 @@ async function load() {
 async function loadFunding() {
   try {
     const r = await fetch("/funding"); if (!r.ok) return;
-    const f = await r.json(), a = f.assets || {};
+    const f = await r.json(), rows = f.rows || [];
     const icon = {PAYING:"🟢", thin:"🟡", negative:"🔴"}[f.verdict] ?? "⚪";
     const say = f.verdict === "PAYING" ? "DEPLOY window — carry pays a real premium"
               : f.verdict === "thin" ? "Stand down — thin vs cash, don't deploy"
               : f.verdict === "negative" ? "Stand down — funding negative"
-              : "no data";
-    $("#funding").innerHTML =
+              : "no data yet";
+    const head =
       `<div class="say">${icon} ${esc(say)}</div>` +
-      `<div class="fine">BTC ${pct(a.BTC)} &middot; ETH ${pct(a.ETH)} annualized ` +
-      `(30d avg) &middot; deploy above ${pct(f.threshold)}. Delta-neutral carry only ` +
-      `&mdash; not a prediction. Phone alerts fire via ntfy when it flips.</div>`;
+      `<div class="fine">Best 30d yield ${pct(f.best_30d)} &middot; deploy above ` +
+      `${pct(f.threshold)} &middot; delta-neutral carry, not a prediction &middot; ` +
+      `alerts via ntfy. Basis = perp vs index (bps); depth = $ shortable near mark.</div>`;
+    const tbl = rows.length ? `<table style="margin-top:.5rem"><thead><tr>` +
+      `<th>venue</th><th>asset</th><th>30d</th><th>now</th><th>basis</th>` +
+      `<th>short depth</th></tr></thead><tbody>` +
+      rows.slice(0, 6).map(x => `<tr><td>${esc(x.venue)}</td><td>${esc(x.asset)}</td>` +
+        `<td>${pct(x.fund_30d)}</td><td>${pct(x.fund_now)}</td>` +
+        `<td>${x.basis_bps.toFixed(0)}b</td>` +
+        `<td>$${(x.depth_usd/1000).toFixed(0)}k</td></tr>`).join("") +
+      `</tbody></table>` : "";
+    $("#funding").innerHTML = head + tbl;
   } catch (e) {}
 }
 load();
