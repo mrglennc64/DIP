@@ -219,11 +219,16 @@ async function loadFunding() {
               : f.verdict === "thin" ? "Stand down — thin vs cash, don't deploy"
               : f.verdict === "negative" ? "Stand down — funding negative"
               : "no data yet";
+    const cash = (f.spread == null) ? "" :
+      ` &middot; <b>cash-vs-carry: ${pct(f.best_30d)} &minus; ${pct(f.risk_free)} ` +
+      `risk-free = ${(f.spread*100>=0?"+":"")}${(f.spread*100).toFixed(1)}% ` +
+      `(${f.spread>0 ? "carry edges cash" : "cash wins"})</b>`;
     const head =
       `<div class="say">${icon} ${esc(say)}</div>` +
       `<div class="fine">Best 30d yield ${pct(f.best_30d)} &middot; deploy above ` +
-      `${pct(f.threshold)} &middot; delta-neutral carry, not a prediction &middot; ` +
-      `alerts via ntfy. Basis = perp vs index (bps); depth = $ shortable near mark.</div>`;
+      `${pct(f.threshold)}${cash} &middot; delta-neutral carry, not a prediction ` +
+      `&middot; alerts via ntfy. Basis = perp vs index (bps); depth = $ shortable ` +
+      `near mark.</div>`;
     const tbl = rows.length ? `<table style="margin-top:.5rem"><thead><tr>` +
       `<th>venue</th><th>asset</th><th>30d</th><th>now</th><th>basis</th>` +
       `<th>short depth</th></tr></thead><tbody>` +

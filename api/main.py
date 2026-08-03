@@ -395,13 +395,15 @@ def get_funding():
     Live 30d average funding from Binance USD-M. Surfaced here as a decision gauge;
     it is not a prediction and does not touch the ledger."""
     import sqlite3
-    thresh, rows, scan = 0.15, [], None
+    thresh, rows, scan, sp = 0.15, [], None, None
     try:
         con = sqlite3.connect("/root/carry_radar.sqlite")
         scan = con.execute("SELECT max(ts) FROM ticks").fetchone()[0]
         rows = con.execute(
             "SELECT venue, asset, fund_now, fund_30d, basis_bps, depth_usd "
             "FROM ticks WHERE ts=? ORDER BY fund_30d DESC", (scan,)).fetchall()
+        sp = con.execute("SELECT risk_free, spread FROM spreads WHERE ts=?",
+                         (scan,)).fetchone()
         con.close()
     except Exception:
         rows = []
@@ -412,7 +414,8 @@ def get_funding():
     verdict = ("no data" if best is None else "PAYING" if best >= thresh
                else "thin" if best > 0 else "negative")
     return {"scan": scan, "threshold": thresh, "best_30d": best,
-            "verdict": verdict, "rows": data}
+            "verdict": verdict, "rows": data,
+            "risk_free": sp[0] if sp else None, "spread": sp[1] if sp else None}
 
 
 @app.get("/health")
