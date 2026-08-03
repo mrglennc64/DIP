@@ -240,8 +240,23 @@ async function loadFunding() {
     $("#funding").innerHTML = head + tbl;
   } catch (e) {}
 }
+async function loadPaper() {
+  try {
+    const r = await fetch("/paper"); if (!r.ok) return;
+    const p = await r.json();
+    if (!p.open) return;
+    const ann = p.ann == null ? "pending (first 8h mark)"
+              : `${(p.ann*100>=0?"+":"")}${(p.ann*100).toFixed(1)}%/yr realized`;
+    $("#funding").innerHTML +=
+      `<div class="fine" style="margin-top:.5rem;border-top:1px solid var(--line);` +
+      `padding-top:.4rem">📄 <b>Paper carry test</b> — $${p.notional.toFixed(0)} ` +
+      `${esc(p.asset)} delta-neutral on ${esc(p.venue)}, ${p.days.toFixed(1)}d: ` +
+      `${p.periods} funding periods, net $${p.net.toFixed(2)} (${ann}). ` +
+      `Simulated, zero risk — proves the mechanics.</div>`;
+  } catch (e) {}
+}
 load();
-loadFunding();
+loadFunding().then(loadPaper);
 </script>
 </main>
 </body>

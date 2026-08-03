@@ -418,6 +418,26 @@ def get_funding():
             "risk_free": sp[0] if sp else None, "spread": sp[1] if sp else None}
 
 
+@app.get("/paper")
+def get_paper():
+    """Paper-carry test P&L (read from the paper_carry snapshot; no network).
+    A SIMULATED delta-neutral funding position, accruing real funding — proves the
+    mechanics with zero risk. Standalone, not prediction scoring."""
+    import sqlite3
+    try:
+        con = sqlite3.connect("/root/paper_carry.sqlite")
+        r = con.execute("SELECT ts, days, periods, collected, net, ann, notional, "
+                        "venue, asset FROM snapshot ORDER BY ts DESC LIMIT 1").fetchone()
+        con.close()
+    except Exception:
+        r = None
+    if not r:
+        return {"open": False}
+    return {"open": True, "ts": r[0], "days": r[1], "periods": r[2],
+            "collected": r[3], "net": r[4], "ann": r[5], "notional": r[6],
+            "venue": r[7], "asset": r[8]}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "principle":
